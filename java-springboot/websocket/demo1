@@ -1,0 +1,158 @@
+package com.mr.operation.controller.socket;//package com.operational.operationservicetool.controller.socket;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.websocket.OnClose;
+import javax.websocket.OnError;
+import javax.websocket.OnMessage;
+import javax.websocket.OnOpen;
+import javax.websocket.Session;
+import javax.websocket.server.ServerEndpoint;
+
+/**
+ * 检测在线客户端
+ * @author Lenovo
+ */
+@Component
+@Slf4j
+@Service
+@ServerEndpoint("/websocket")
+public class WebSocketServer1 {
+
+    /**
+     * 用于存放所有在线的客户端 */
+    private static CopyOnWriteArraySet<WebSocketServer1> webSocketSet = new CopyOnWriteArraySet<>();
+
+    /** 与某个客户端的连接会话，需要通过它来给客户端发送数据 */
+    private Session session;
+
+    /** 心跳检测线程 */
+    private Thread heartbeatThread;
+
+    /** 心跳间隔时间，单位毫秒 */
+    private static final int HEARTBEAT_INTERVAL = 5000;
+
+    /** 心跳数据包内容 */
+    private static final String HEARTBEAT_MESSAGE = "ping";
+
+    /** 客户端在线状态 */
+    private boolean online = false;
+
+    /** 定义一个固定大小的线程池和一个队列 */
+    /** 线程池大小 */
+    private static final int THREAD_POOL_SIZE = 10;
+    /** 任务队列大小 */
+    private static final int QUEUE_SIZE = 100;
+
+    /**
+     * 自定义线程池名称的ThreadFactory
+     * 用于设置线程池中线程的名称
+     */
+    private static class NamedThreadFactory implements ThreadFactory {
+        private final AtomicInteger threadNumber = new AtomicInteger(1);
+        private final String namePrefix;
+
+        NamedThreadFactory(String name) {
+            namePrefix = name + "-thread-";
+        }
+
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, namePrefix + threadNumber.getAndIncrement());
+            if (t.isDaemon()) {
+                t.setDaemon(false);
+            }
+            if (t.getPriority() != Thread.NORM_PRIORITY) {
+                t.setPriority(Thread.NORM_PRIORITY);
+            }
+            return t;
+        }
+    }
+
+    /**
+     * 创建线程池
+     * 核心线程数和最大线程数都设置为THREAD_POOL_SIZE，
+     * 当任务队列中的任务数量超过QUEUE_SIZE时，新任务将被拒绝。
+     * 任务队列使用LinkedBlockingQueue实现，队列大小为QUEUE_SIZE。
+     * 任务队列大小需要根据实际情况进行调整，过大会消耗过多内存，过小会导致任务被拒绝。
+     * 使用NamedThreadFactory来设置线程池中线程的名称。
+     */
+    private static final ExecutorService threadPool = new ThreadPoolExecutor(
+            THREAD_POOL_SIZE,
+            THREAD_POOL_SIZE,
+            0L,
+            TimeUnit.MILLISECONDS,
+            new LinkedBlockingQueue<>(QUEUE_SIZE),
+            new NamedThreadFactory("my-thread-pool")
+    );
+
+
+    @OnOpen
+    public void onOpen(Session session) {
+        this.session = session;
+        /** 加入set中 */
+        webSocketSet.add(this);
+        System.out.println("有新连接加入！当前在线人数为" + webSocketSet.size());
+        /** 启动心跳检测线程 */
+        heartbeatThread = (Thread) threadPool.submit(new Runnable() {
+            @Override
+            public void run() {
+                while (true) {
+                    try {
+                        Thread.sleep(HEARTBEAT_INTERVAL); // 等待一定时间
+                        if (online) { // 如果客户端在线，发送心跳包
+                            sendMessage(HEARTBEAT_MESSAGE);
+                        } else { // 如果客户端不在线，关闭连接
+                            onClose();
+                            break;
+                        }
+                        online = false; // 重置在线状态为false，等待客户端回应
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        });
+    }
+
+    @OnClose
+    public void onClose() {
+        /** 从set中删除 */
+        webSocketSet.remove(this);
+        System.out.println("有一连接关闭！当前在线人数为" + webSocketSet.size());
+        // 停止心跳检测线程
+        if (heartbeatThread != null) {
+            heartbeatThread.interrupt();
+        }
+    }
+
+    @OnMessage
+    public void onMessage(String message, Session session) {
+        System.out.println("来自客户端的消息:" + message);
+        /** 收到客户端的心跳包，更新在线状态 */
+        if (HEARTBEAT_MESSAGE.equals(message)) {
+            online = true;
+        }
+        // 其他逻辑处理
+        // ...
+    }
+
+    @OnError
+    public void onError(Session session, Throwable error) {
+        System.out.println("发生错误");
+        error.printStackTrace();
+    }
+
+    public void sendMessage(String message) {
+        try {
+            this.session.getBasicRemote().sendText(message);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
