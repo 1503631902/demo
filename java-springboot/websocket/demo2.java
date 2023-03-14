@@ -1,53 +1,50 @@
 package com.mr.operation.controller.socket;
 
-import java.io.IOException;
-import java.util.concurrent.CopyOnWriteArraySet;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
+
 import javax.websocket.*;
 import javax.websocket.server.PathParam;
 import javax.websocket.server.ServerEndpoint;
+import java.io.IOException;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * WebSocket 服务端
- */
-@ServerEndpoint("/webSocket/{cid}")
-public class WebSocketServer1 {
+@Component
+@Slf4j
+@Service
+@ServerEndpoint("/api/websocket/{sid}")
+public class WebSocketServer {
 
-    /**
-     * 静态变量，用来记录当前在线连接数
-     */
-    private static int onlineCount = 0;
+    /** 静态变量，用来记录当前在线连接数。应该把它设计成线程安全的。 */
+    private static final AtomicInteger onlineCount = new AtomicInteger(0);
+    /** concurrent 包的线程安全 Set，用来存放每个客户端对应的 WebSocket 对象。 */
+    private static final Map<String, Set<WebSocketServer>> sidWebSocketSetMap = new ConcurrentHashMap<>();
 
-    /**
-     * concurrent 包的线程安全 Set，用来存放每个客户端对应的 WebSocketServer 对象
-     */
-    private static CopyOnWriteArraySet<WebSocketServer1> webSocketSet = new CopyOnWriteArraySet<>();
-
-    /**
-     * 与某个客户端的连接会话，需要通过它来给客户端发送数据
-     */
+    /** 静态变量，用来记录当前在线连接数。应该把它设计成线程安全的。 */
     private Session session;
-
-    /**
-     * 客户端 ID
-     */
-    private String cid = "";
+    private String sid = "";
 
     /**
      * 连接建立成功调用的方法
      */
     @OnOpen
-    public void onOpen(Session session, @PathParam("cid") String cid) {
+    public void onOpen(Session session, @PathParam("sid") String sid) {
         this.session = session;
-        // 将当前 WebSocket 对象加入到 Set 中
-        webSocketSet.add(this);
-        // 在线连接数加 1
+        this.sid = sid;
+        // 加入 set 中
+        sidWebSocketSetMap.computeIfAbsent(sid, key -> new CopyOnWriteArraySet<>()).add(this);
+        // 在线数加1
         addOnlineCount();
-        System.out.println("有新窗口开始监听：" + cid + "，当前在线人数为：" + getOnlineCount());
-        this.cid = cid;
         try {
-            sendMessage("连接成功");
+            sendMessage("conn_success");
+            log.info("有新客户端开始监听,sid={},当前在线人数为:{}", sid, getOnlineCount());
         } catch (IOException e) {
-            System.out.println("websocket IO异常");
+            log.error("websocket IO Exception", e);
         }
     }
 
@@ -56,71 +53,71 @@ public class WebSocketServer1 {
      */
     @OnClose
     public void onClose() {
-        // 将当前 WebSocket 对象从 Set 中删除
-        webSocketSet.remove(this);
-        // 在线连接数减 1
+        sidWebSocketSetMap.computeIfPresent(sid, (key, value) -> {
+            value.remove(this);
+            if (value.isEmpty()) {
+                sidWebSocketSetMap.remove(key);
+            }
+            return value;
+        });
         subOnlineCount();
-        System.out.println("有一连接关闭！当前在线人数为：" + getOnlineCount());
+        releaseResource();
     }
 
-    /**
-     * 收到客户端消息后调用的方法
-     *
-     * @param message 客户端发送过来的消息
-     */
+    private void releaseResource() {
+        log.info("有一连接关闭！当前在线人数为{}", getOnlineCount());
+        // 处理资源释放和业务逻辑
+    }
+
     @OnMessage
     public void onMessage(String message, Session session) {
-        System.out.println("来自客户端 " + cid + " 的消息：" + message);
+        log.info("收到来自客户端 sid={} 的信息:{}", sid, message);
         // 群发消息
-        for (WebSocketServer1 item : webSocketSet) {
-            try {
-                item.sendMessage(message);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+        Set<WebSocketServer> webSocketSet = sidWebSocketSetMap.get(sid);
+        if (webSocketSet != null) {
+            webSocketSet.forEach(webSocketServer -> {
+                try {
+                    webSocketServer.sendMessage("客户端 " + sid + "发布消息：" + message);
+                } catch (IOException e) {
+                    log.error("消息发送失败", e);
+                }
+            });
         }
     }
 
-    /**
-     * 发生错误时调用
-     */
     @OnError
     public void onError(Session session, Throwable error) {
-        System.out.println("发生错误");
-        error.printStackTrace();
+        log.error("{}客户端发生错误", session.getBasicRemote(), error);
     }
 
-    /**
-     * 向客户端发送消息
-     *
-     * @param message 消息内容
-     * @throws IOException
-     */
-    private void sendMessage(String message) throws IOException {
+    public static void sendMessage(String message, String sid) throws IOException {
+        log.info("推送消息到客户端 {}，推送内容:{}", sid, message);
+
+        Set<WebSocketServer> webSocketSet = sidWebSocketSetMap.get(sid);
+        if (webSocketSet != null) {
+            webSocketSet.forEach(webSocketServer -> {
+                try {
+                    webSocketServer.sendMessage(message);
+                } catch (IOException e) {
+                    log.error("消息发送失败", e);
+                }
+            });
+        }
+    }
+
+    public void sendMessage(String message) throws IOException {
         this.session.getBasicRemote().sendText(message);
     }
 
-    /**
-     * 获取当前在线人数
-     *
-     * @return 在线人数
-     */
-    private static synchronized int getOnlineCount() {
-        return onlineCount;
+    public static int getOnlineCount() {
+        return onlineCount.get();
     }
 
-    /**
-     * 在线人数加 1
-     */
-    private static synchronized void addOnlineCount() {
-        WebSocketServer1.onlineCount++;
+    public static void addOnlineCount() {
+        onlineCount.incrementAndGet();
     }
 
-    /**
-     * 在线人数减 1
-     */
-    private static synchronized void subOnlineCount() {
-        WebSocketServer1.onlineCount--;
+    public static void subOnlineCount() {
+        onlineCount.decrementAndGet();
     }
 }
-
